@@ -260,7 +260,7 @@ section_id → {
 }
 ```
 
-This bundle becomes the input to Step 1 (which may further split a section if it exceeds the 200 KB component-size limit) and Step 2 (which applies R1–R9 normalization).
+This bundle becomes the input to Step 1 (which may further split a section if it exceeds the 256 KB component-size limit) and Step 2 (which applies R1–R9 normalization).
 
 #### F. Distribution rules cheat-sheet
 
@@ -299,7 +299,8 @@ Rules:
 - If the input genuinely contains only one semantic block, the output of this step is one section — no artificial splitting required.
 - Never split mid-block just to reduce size.
 - Never merge unrelated blocks into one section to simplify.
-- Hard size constraint: each serialized `component` JSON string must stay under **200 KB** (~150 KB of HTML/CSS/JS is safe headroom). If a semantically single block exceeds 200 KB, split at the next natural sub-boundary and note the reason.
+- **Preserve `<script>` tags inside sections.** Any `<script>` tag (inline or `src=`) that appears inside a section's HTML during splitting must stay with that section — do not strip, hoist, or drop it. If the same `<script>` is shared across sections, duplicate it into each (same handling as Step 0 D for JS blocks). The only `<script>` rewrites allowed at later steps are R5 (wrap inline JS into the section's IIFE) and R12 (keep GemPages runtime asset scripts as-is).
+- Hard size constraint: each serialized `component` JSON string must stay under **256 KB** (~200 KB of HTML/CSS/JS is safe headroom). A single-section HTML split must never exceed 256 KB. If a semantically single block exceeds 256 KB, split at the next natural sub-boundary and note the reason.
 
 **Output of this step:** a numbered list of section blocks, each with a clear label (e.g. `Section 1 — Hero`, `Section 2 — Features`, …). Only then proceed to Step 2 for each block individually.
 
@@ -416,18 +417,72 @@ The envelope is already a `<div>` (R1) and the GemPages framework wraps the outp
 **R11 — Strip `shopify-section` and `gps-lazy`**
 Remove any `class` or `id` token that contains `shopify-section` or `gps-lazy` (including suffixed variants like `shopify-section-template--xxx` or `gps-lazy-loaded`). If the attribute becomes empty after removal, drop the attribute entirely.
 
-**R12 — Preserve GemPages runtime asset scripts**
-Any `<script>` tag whose `src` points to `assets.gemcommerce.com` (e.g. `gp-accordion`, `gp-tabs`, `gp-slider`, `gp-countdown`, …) is a GemPages runtime asset required for the component to work. **Keep these tags exactly as found** — do not remove, rewrite the URL, strip the `defer`/`class=""` attributes, or move them into the section's `<script>` IIFE. Example to leave untouched:
+**R12 — Preserve every `<script>` tag found inside a section**
+Any `<script>` tag that appears inside a section's HTML must be kept **exactly as found**, including all attributes and the original tag body. This rule applies regardless of:
+
+- whether the tag has `src`, has a non-standard URL attribute (e.g. `delay=`, `data-src=`, `data-href=`, `data-url=`), or is inline;
+- which CDN/host the URL points to (assets.gemcommerce.com, jsdelivr, your own CDN, Shopify CDN, etc.);
+- whether the tag body is empty (an empty `<script ...></script>` with only attributes is still a valid, load-bearing tag — **empty body is not a reason to delete it**);
+- the value of `class`, `id`, `type`, `defer`, `async`, `nomodule`, `crossorigin`, `integrity`, or any other attribute.
+
+Do not remove the tag, rewrite URLs, strip or normalize attributes, reorder tags, or fold the tag into the section's own `<script>` IIFE.
 
 ```html
-<script
-  class=""
-  defer="defer"
-  src="https://assets.gemcommerce.com/assets-v2/gp-accordion-v7-5.js?v=1773889975358"
-></script>
+<!-- All of these are preserved as-is — including the empty-body ones -->
+<script class="" defer="defer" src="https://assets.gemcommerce.com/assets-v2/gp-accordion-v7-5.js?v=1773889975358"></script>
+<script class="gps-link" delay="https://assets.gemcommerce.com/assets-v2/gp-button-v7-5.js?v=1773889975358" defer="defer"></script>
+<script data-src="https://cdn.example.com/lazy.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/some-lib@1/dist/lib.min.js" defer></script>
+<script>
+  // inline script already in the input — keep verbatim
+  window.__myFlag = true;
+</script>
 ```
 
-These scripts are the only external `<script src>` tags allowed inside a section by R5; R11 cleanup must not touch them.
+Note: GemPages-loader patterns use non-standard URL attributes like `delay=` (and the loader-tag classes such as `gps-link`) to defer asset loading; these must survive. R11 strips only `shopify-section` and `gps-lazy` tokens — it must not touch `gps-link` or any other `gps-*` class on a preserved `<script>`.
+
+These preserved tags are the only `<script>` tags allowed inside a section beyond the single section-IIFE block from R5; R11 cleanup must not touch them. R5 still governs **new** JS written by the normalization pass (wrap in IIFE, no top-level `var`/`let`/`const`, no jQuery) — it does not give license to rewrite existing `<script>` tags.
+
+**R13 — Minify HTML/CSS/JS to stay under the 256 KB component cap**
+After R1–R12 are applied, minify the three extracted strings (`html`, `css`, the section's own IIFE `javascript`) before they go into `advanced.editorData`. The goal is reducing serialized `component` size, not stylistic cleanup — so be conservative and never break behavior.
+
+Safe transforms:
+
+- **HTML**: collapse runs of whitespace between tags into a single space; strip leading/trailing whitespace on lines; remove HTML comments `<!-- … -->` (but keep conditional comments `<!--[if …]>` and any `<!-- KEEP -->` markers the input explicitly flags). **Preserve verbatim** the inner content of `<pre>`, `<code>`, `<textarea>`, and every preserved-as-is `<script>` tag from R12.
+- **CSS**: remove `/* … */` comments; collapse whitespace around `{ } : ; ,`; drop the trailing `;` before `}`; lowercase hex colors and shorten `#ffffff` → `#fff` when safe; remove empty rules; keep `@import`, `@media`, `@keyframes`, `@font-face`, and `@supports` intact.
+- **JS (section's own IIFE only)**: strip `// …` and `/* … */` comments; collapse whitespace; remove blank lines; keep semicolons. **Do not rename identifiers, do not mangle, do not run aggressive bundler-style minification** — the IIFE may reference `{{rootClassName}}` and Liquid variables that must remain intact.
+
+Hard prohibitions (will break the section):
+
+- Do **not** minify or otherwise touch any `<script>` tag preserved under R12 — copy it byte-for-byte. Minification applies only to the section's own IIFE body extracted into `editorData.javascript`.
+- Do **not** alter `{{rootClassName}}`, Liquid expressions (`{{ … }}`, `{% … %}`), or any class/id token. R2's `gp-` prefixes must survive.
+- Do **not** strip whitespace inside string literals, `url("…")` values, or `@import url(…)` URLs.
+- Do **not** remove an attribute, tag, or rule just because it "looks unused" — that's outside the scope of minification.
+
+If, after minification, the serialized `component` is still > 256 KB, return to Step 1 and split at the next natural sub-boundary; never reach the cap by deleting content.
+
+**R14 — No DOM round-trip rewriting of source HTML (preserve attributes & inline SVG byte-for-byte)**
+Step 1 (split) and Step 2 (normalize) must operate by locating boundaries in the source and extracting **verbatim substrings**. Do not feed the section through a tree-based parse → re-serialize cycle, because mainstream HTML/XML serializers silently apply transformations that break visual output:
+
+- **Attribute reordering** — many serializers (lxml, some BeautifulSoup configs, jsdom canonical mode, SVGO `sortAttrs`) alphabetize attributes. This is harmless for most tags but destroys the original authoring order, which can matter for CSS attribute selectors and for diff review.
+- **SVG dimension "fixing"** — SVG optimizers detect `width`/`height` that differ from `viewBox` and "correct" them to viewBox dimensions. This is wrong: `width`/`height` define render size, `viewBox` defines internal coordinate space, and they are intentionally independent. Example regression:
+  ```html
+  <!-- input: 20×20 px icon drawn in a 136×136 viewBox -->
+  <svg data-name="Frame.svg" data-id="611505089231717025" width="20" height="20"
+       xmlns="http://www.w3.org/2000/svg" viewBox="0 0 136 136" fill="none">
+  <!-- WRONG output: width/height overwritten to 136 -->
+  <svg data-id="611505089231717025" data-name="Frame.svg" fill="none"
+       height="136" viewBox="0 0 136 136" width="136" xmlns="http://www.w3.org/2000/svg">
+  ```
+  The icon renders at 136 px instead of 20 px.
+- **Quote/entity/void-tag normalization** — single quotes → double quotes, `&copy;` → `©`, `<br>` ↔ `<br/>`, boolean attributes collapsed (`defer="defer"` → `defer`). Any of these can break theme code that does string matching on the HTML.
+
+Required handling:
+
+- **Step 1 split**: locate section boundaries using parser-aware tag matching, but slice the original source string at byte offsets — emit substrings, never reserialize.
+- **Step 2 normalize**: apply R1–R12 as **targeted edits** on the substring (regex / surgical AST patches scoped to the specific tag being changed). Do not re-emit the whole section from a DOM.
+- **Inline SVG**: pass through untouched. No SVGO, no `sortAttrs`, no `removeDimensions`, no `cleanupNumericValues`. If you must edit an SVG (e.g. patch a class name per R2), edit only that attribute in place.
+- **R13 minification**: applies to whitespace and comments only — it must not reorder attributes, change quoting, or touch SVG content.
 
 After normalization, extract from the envelope:
 
@@ -815,7 +870,9 @@ SECTION: <section-name>
 ✅ R9   Scoped CSS reset present
 ✅ R10  HTML contains no <section> tags (replaced with <div>; aria-label preserved)
 ✅ R11  No class/id contains "shopify-section" or "gps-lazy" (empty attributes removed)
-✅ R12  <script src="assets.gemcommerce.com/..."> tags preserved as-is (not removed, not rewritten)
+✅ R12  Every <script> tag preserved as-is (inline, src=, or delay=/data-src=; empty body OK)
+✅ R13  HTML/CSS/IIFE-JS minified; R12 scripts byte-for-byte; serialized component ≤ 256 KB
+✅ R14  No DOM round-trip: attribute order preserved, inline SVG unchanged, width/height not rewritten to viewBox
 ✅ Component: tag = "Section" → "Col" → "CSSCode" (exact case)
 ✅ Component: html/css/javascript in advanced.editorData of CSSCode leaf only
 ✅ Component: JSON.stringify'd into a string (not nested object)
