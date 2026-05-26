@@ -416,6 +416,19 @@ The envelope is already a `<div>` (R1) and the GemPages framework wraps the outp
 **R11 — Strip `shopify-section` and `gps-lazy`**
 Remove any `class` or `id` token that contains `shopify-section` or `gps-lazy` (including suffixed variants like `shopify-section-template--xxx` or `gps-lazy-loaded`). If the attribute becomes empty after removal, drop the attribute entirely.
 
+**R12 — Preserve GemPages runtime asset scripts**
+Any `<script>` tag whose `src` points to `assets.gemcommerce.com` (e.g. `gp-accordion`, `gp-tabs`, `gp-slider`, `gp-countdown`, …) is a GemPages runtime asset required for the component to work. **Keep these tags exactly as found** — do not remove, rewrite the URL, strip the `defer`/`class=""` attributes, or move them into the section's `<script>` IIFE. Example to leave untouched:
+
+```html
+<script
+  class=""
+  defer="defer"
+  src="https://assets.gemcommerce.com/assets-v2/gp-accordion-v7-5.js?v=1773889975358"
+></script>
+```
+
+These scripts are the only external `<script src>` tags allowed inside a section by R5; R11 cleanup must not touch them.
+
 After normalization, extract from the envelope:
 
 - `html` — content between `</style>` and `<script>`
@@ -802,6 +815,7 @@ SECTION: <section-name>
 ✅ R9   Scoped CSS reset present
 ✅ R10  HTML contains no <section> tags (replaced with <div>; aria-label preserved)
 ✅ R11  No class/id contains "shopify-section" or "gps-lazy" (empty attributes removed)
+✅ R12  <script src="assets.gemcommerce.com/..."> tags preserved as-is (not removed, not rewritten)
 ✅ Component: tag = "Section" → "Col" → "CSSCode" (exact case)
 ✅ Component: html/css/javascript in advanced.editorData of CSSCode leaf only
 ✅ Component: JSON.stringify'd into a string (not nested object)
